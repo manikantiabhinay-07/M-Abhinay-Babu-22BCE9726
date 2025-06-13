@@ -1,3 +1,5 @@
+12th June 2025 CLASSWORK
+
 COMMANDS USED FOR SETTING PRIMARY AND 2 SECONDARY REPLICAS:
 mongod --replSet rs0 --port 27018 --dbpath C:\data\db0 --bind_ip localhost    #PRIMARY REPLICA
 mongod --replSet rs0 --port 27018 --dbpath C:\data\db1 --bind_ip localhost    #SECONDARY REPLICA
@@ -165,3 +167,124 @@ rs0 [direct: primary] test> rs.status()
   },
   operationTime: Timestamp({ t: 1749740589, i: 1 })
 }
+
+
+Sequence that I Followed:
+
+1. Setup Scripts
+1.1 start_replicas.bat (Windows batch file to start replica set members)
+
+@echo off
+REM Create data directories
+mkdir C:\data\db0 2>nul
+mkdir C:\data\db1 2>nul
+mkdir C:\data\db2 2>nul
+
+REM Start replica set members in separate windows
+start "MongoDB Primary" mongod --replSet rs0 --port 27017 --dbpath C:\data\db0 --bind_ip localhost
+start "MongoDB Secondary 1" mongod --replSet rs0 --port 27018 --dbpath C:\data\db1 --bind_ip localhost
+start "MongoDB Secondary 2" mongod --replSet rs0 --port 27019 --dbpath C:\data\db2 --bind_ip localhost
+
+echo Replica set members started. Waiting 10 seconds for initialization...
+timeout /t 10 >nul
+
+1.2 init_replica_set.js (Initialization script)
+
+// Initialize replica set configuration
+const config = {
+    _id: "rs0",
+    members: [
+        { _id: 0, host: "localhost:27017", priority: 2 },
+        { _id: 1, host: "localhost:27018" },
+        { _id: 2, host: "localhost:27019" }
+    ]
+};
+
+// Initiate replica set
+rs.initiate(config);
+
+// Check status (wait for election)
+sleep(5000);
+print("Replica Set Status:");
+rs.status();
+
+1.3 setup_replica.bat (Main setup script)
+
+@echo off
+call start_replicas.bat
+echo Initializing replica set...
+mongosh --port 27017 --quiet init_replica_set.js
+echo Setup complete! Connect to primary using: mongosh --port 27017
+pause
+
+
+2. Verification Scripts
+2.1 check_status.js (Verify replica set status)
+
+const status = rs.status();
+const members = status.members;
+
+print("Replica Set Members:");
+members.forEach(member => {
+    print(`- ${member.name} (${member.stateStr})`);
+});
+
+// Verify write concern
+assert(db.getMongo().setReadPref('primary'));
+const testDoc = { _id: new ObjectId(), timestamp: new Date() };
+db.test.insertOne(testDoc);
+print("Write operation successful on primary");
+
+// Verify replication
+assert(db.getMongo().setReadPref('secondary'));
+const docs = db.test.find().toArray();
+print(`Secondary read successful. Documents count: ${docs.length}`);
+2.2 test_replication.js (Test data replication)
+
+// Insert test data
+for (let i = 1; i <= 100; i++) {
+    db.test.insertOne({ 
+        number: i,
+        message: `Document ${i}`,
+        created: new Date()
+    });
+}
+print("Inserted 100 test documents");
+
+// Verify replication to secondaries
+sleep(3000);
+const secondaries = rs.status().members.filter(m => m.stateStr === 'SECONDARY');
+
+secondaries.forEach(secondary => {
+    const conn = new Mongo(secondary.name);
+    const secondaryDB = conn.getDB("test");
+    const count = secondaryDB.test.countDocuments();
+    print(`Documents on ${secondary.name}: ${count}`);
+    assert.eq(count, 100, "Document count mismatch on secondary");
+});
+
+
+3. Maintenance Scripts
+3.1 force_primary.js (Force specific member as primary)
+
+const targetMember = rs.status().members.find(m => m.name === "localhost:27017");
+
+cfg = rs.conf();
+cfg.members.forEach(member => {
+    member.priority = (member._id === targetMember._id) ? 2 : 1;
+});
+
+rs.reconfig(cfg, {force: true});
+print(`Reconfigured. ${targetMember.name} should be primary`);
+3.2 simulate_failure.js (Simulate primary failure)
+
+// Find current primary
+const primary = rs.status().members.find(m => m.stateStr === 'PRIMARY');
+
+print(`Stopping primary: ${primary.name}`);
+db.adminCommand({shutdown: 1, force: true});
+
+// Wait for failover
+sleep(10000);
+const newPrimary = rs.status().members.find(m => m.stateStr === 'PRIMARY');
+print(`New primary elected: ${newPrimary.name}`);
